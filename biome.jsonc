@@ -1,6 +1,9 @@
 {
 	"$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
 	"root": true,
+	"files": {
+		"includes": ["src/**", "*.json", "*.jsonc", "*.ts", "*.tsx", "*.css"]
+	},
 	"vcs": {
 		"enabled": true,
 		"useIgnoreFile": true,
@@ -24,6 +27,9 @@
 		"enabled": true,
 		"rules": {
 			"recommended": true,
+			"style": {
+				"noNonNullAssertion": "off"
+			},
 			"nursery": {
 				"useSortedClasses": {
 					"level": "warn",
