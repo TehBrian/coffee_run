@@ -2,6 +2,7 @@
 
 import Matter from "matter-js";
 import {
+	type MutableRefObject,
 	type MouseEvent,
 	useCallback,
 	useEffect,
@@ -23,6 +24,11 @@ interface StaticBoundsBodies {
 	ground: Matter.Body;
 	wallL: Matter.Body;
 	wallR: Matter.Body;
+}
+
+interface SoundPool {
+	template: HTMLAudioElement | null;
+	active: Set<HTMLAudioElement>;
 }
 
 type Phase = "normal" | "hyper" | "black";
@@ -225,6 +231,7 @@ const BLOCK_SPAWN_PER_FRAME = 4;
 const REALM_LINE_MS = 1450;
 const WHITEOUT_DURATION_MS = 4900;
 const WHITEOUT_HOLD_MS = 400;
+const ENDING_SETTLE_BUFFER_MS = 650;
 
 const BUTTON_BG = "rgba(246,230,211,0.82)";
 const BUTTON_BG_HOVER = "rgba(252,240,225,0.92)";
@@ -455,8 +462,68 @@ export default function CoffeeGame() {
 	const ascStepRef = useRef<AscensionStep>("idle");
 	const blackTransitionReadyRef = useRef(false);
 	const ascTimersRef = useRef<number[]>([]);
-	const riseSoundRef = useRef<HTMLAudioElement | null>(null);
-	const snapSoundRef = useRef<HTMLAudioElement | null>(null);
+	const riseSoundPoolRef = useRef<SoundPool>({
+		template: null,
+		active: new Set(),
+	});
+	const snapSoundPoolRef = useRef<SoundPool>({
+		template: null,
+		active: new Set(),
+	});
+	const clickSoundPoolRef = useRef<SoundPool>({
+		template: null,
+		active: new Set(),
+	});
+
+	const playFromPool = useCallback(
+		(poolRef: MutableRefObject<SoundPool>, src: string, volume = 1) => {
+			if (!poolRef.current.template) {
+				const template = new Audio(src);
+				template.preload = "auto";
+				template.volume = volume;
+				poolRef.current.template = template;
+			}
+
+			const template = poolRef.current.template;
+			if (!template) return;
+
+			const sound = template.cloneNode(true) as HTMLAudioElement;
+			sound.volume = volume;
+			poolRef.current.active.add(sound);
+
+			const cleanup = () => {
+				poolRef.current.active.delete(sound);
+				sound.removeEventListener("ended", cleanup);
+				sound.removeEventListener("error", cleanup);
+			};
+
+			sound.addEventListener("ended", cleanup);
+			sound.addEventListener("error", cleanup);
+
+			void sound.play().catch(() => {
+				cleanup();
+				// Ignore playback rejection if the file is missing or blocked.
+			});
+		},
+		[],
+	);
+
+	useEffect(() => {
+		return () => {
+			for (const poolRef of [
+				riseSoundPoolRef,
+				snapSoundPoolRef,
+				clickSoundPoolRef,
+			]) {
+				for (const sound of poolRef.current.active) {
+					sound.pause();
+					sound.currentTime = 0;
+				}
+				poolRef.current.active.clear();
+				poolRef.current.template = null;
+			}
+		};
+	}, []);
 
 	// Keep ref in sync
 	useEffect(() => {
@@ -488,24 +555,56 @@ export default function CoffeeGame() {
 		ascTimersRef.current.push(id);
 	}, []);
 
+	const placeFigureForEnding = useCallback(() => {
+		const fig = figureRef.current;
+		if (!fig) return;
+
+		const { w, h } = renderSizeRef.current;
+		const bodies = [
+			fig.head,
+			fig.torso,
+			fig.upperArmL,
+			fig.lowerArmL,
+			fig.upperArmR,
+			fig.lowerArmR,
+			fig.upperLegL,
+			fig.lowerLegL,
+			fig.upperLegR,
+			fig.lowerLegR,
+		];
+
+		// Middle of the room, raised above the floor to allow a brief settle.
+		const baseX = w * 0.5;
+		const baseY = h - 110;
+		const offsets = [
+			{ x: -48, y: -75, angle: -0.22 },
+			{ x: -12, y: -42, angle: -0.08 },
+			{ x: -60, y: -28, angle: 0.24 },
+			{ x: -78, y: -8, angle: 0.46 },
+			{ x: 22, y: -30, angle: -0.26 },
+			{ x: 56, y: -8, angle: -0.44 },
+			{ x: -8, y: 10, angle: 0.12 },
+			{ x: -26, y: 36, angle: 0.32 },
+			{ x: 24, y: 8, angle: -0.14 },
+			{ x: 46, y: 34, angle: -0.34 },
+		];
+
+		for (let i = 0; i < bodies.length; i++) {
+			const body = bodies[i]!;
+			const o = offsets[i]!;
+			Matter.Body.setPosition(body, { x: baseX + o.x, y: baseY + o.y });
+			Matter.Body.setVelocity(body, { x: 0, y: 0 });
+			Matter.Body.setAngularVelocity(body, 0);
+			Matter.Body.setAngle(body, o.angle);
+		}
+	}, []);
+
 	useEffect(() => {
 		if (ascStep !== "blinding") {
 			return;
 		}
-
-		if (!riseSoundRef.current) {
-			const sound = new Audio("/rise.wav");
-			sound.preload = "auto";
-			riseSoundRef.current = sound;
-		}
-
-		const sound = riseSoundRef.current;
-		if (!sound) return;
-		sound.currentTime = 0;
-		void sound.play().catch(() => {
-			// Ignore autoplay rejection; this runs after explicit user input.
-		});
-	}, [ascStep]);
+		playFromPool(riseSoundPoolRef, "/rise.wav");
+	}, [ascStep, playFromPool]);
 
 	// ── Physics Init ────────────────────────────────────────────────────────────
 	useEffect(() => {
@@ -513,7 +612,7 @@ export default function CoffeeGame() {
 		renderSizeRef.current = { w, h };
 
 		const engine = Matter.Engine.create({
-			gravity: { x: 0, y: 2.3 },
+			gravity: { x: 0, y: 5.4 },
 			constraintIterations: 8,
 			positionIterations: 10,
 			velocityIterations: 8,
@@ -798,7 +897,7 @@ export default function CoffeeGame() {
 			clearInterval(jitterIntervalRef.current);
 			jitterIntervalRef.current = null;
 		}
-		const endingNoEffects = phase === "black" || ascStep === "dead";
+		const endingNoEffects = ascStep === "dead";
 		if (endingNoEffects) {
 			setJitter({ x: 0, y: 0 });
 			return;
@@ -819,7 +918,7 @@ export default function CoffeeGame() {
 		return () => {
 			if (jitterIntervalRef.current) clearInterval(jitterIntervalRef.current);
 		};
-	}, [caffeineLevel, phase, ascStep]);
+	}, [caffeineLevel, ascStep]);
 
 	// ── Phase transitions ────────────────────────────────────────────────────────
 	useEffect(() => {
@@ -908,8 +1007,7 @@ export default function CoffeeGame() {
 			const { w, h } = renderSizeRef.current;
 			const mg = caffeineLevelRef.current;
 			const baseFx = computeEffects(mg);
-			const endingNoEffects =
-				ascStepRef.current === "dead" || getPhase(mg) === "black";
+			const endingNoEffects = ascStepRef.current === "dead";
 			const fx = endingNoEffects
 				? {
 						...baseFx,
@@ -981,7 +1079,8 @@ export default function CoffeeGame() {
 			ctx.restore();
 
 			if (figureRef.current) {
-				const deadMode = ascStepRef.current === "dead";
+				const deadMode =
+					ascStepRef.current === "dead" || getPhase(mg) === "black";
 				drawStickFigure(
 					ctx,
 					figureRef.current,
@@ -1035,9 +1134,14 @@ export default function CoffeeGame() {
 		pour.pendingBlocks += Math.max(1, Math.round(mg / CAFFEINE_BLOCK_MG));
 	}, []);
 
+	const playDrinkClick = useCallback(() => {
+		playFromPool(clickSoundPoolRef, "/click.wav", 0.3);
+	}, [playFromPool]);
+
 	const handleDrink = useCallback(
 		(mg: number) => {
 			if (phase === "black") return;
+			playDrinkClick();
 			setCaffeineLevel((prev) => {
 				const next = prev + mg;
 				caffeineLevelRef.current = next;
@@ -1045,7 +1149,7 @@ export default function CoffeeGame() {
 			});
 			queuePour(mg);
 		},
-		[phase, queuePour],
+		[phase, playDrinkClick, queuePour],
 	);
 
 	// ── Ascension handlers ────────────────────────────────────────────────────────
@@ -1070,11 +1174,18 @@ export default function CoffeeGame() {
 		if (ascStep !== "ascended") return;
 		clearAscTimers();
 		setAscStep("realm");
+		const endingTransitionMs =
+			REALM_LINE_MS + WHITEOUT_DURATION_MS + WHITEOUT_HOLD_MS;
+		const prepAtMs = Math.max(0, endingTransitionMs - ENDING_SETTLE_BUFFER_MS);
 		queueAscTimeout(() => {
 			setAscStep("blinding");
 			setAscWhiteTransitionMs(WHITEOUT_DURATION_MS);
 			setAscWhiteOverlay(1);
 		}, REALM_LINE_MS);
+		queueAscTimeout(() => {
+			clearCaffeineBlocks();
+			placeFigureForEnding();
+		}, prepAtMs);
 		queueAscTimeout(
 			() => {
 				clearCaffeineBlocks();
@@ -1082,25 +1193,19 @@ export default function CoffeeGame() {
 				setAscWhiteTransitionMs(0);
 				setAscWhiteOverlay(0);
 			},
-			REALM_LINE_MS + WHITEOUT_DURATION_MS + WHITEOUT_HOLD_MS,
+			endingTransitionMs,
 		);
-	}, [ascStep, clearAscTimers, clearCaffeineBlocks, queueAscTimeout]);
+	}, [
+		ascStep,
+		clearAscTimers,
+		clearCaffeineBlocks,
+		placeFigureForEnding,
+		queueAscTimeout,
+	]);
 
 	const playSnap = useCallback(() => {
-		if (!snapSoundRef.current) {
-			const sound = new Audio("/snap.wav");
-			sound.preload = "auto";
-			sound.volume = 0.5;
-			snapSoundRef.current = sound;
-		}
-
-		const sound = snapSoundRef.current;
-		if (!sound) return;
-		sound.currentTime = 0;
-		void sound.play().catch(() => {
-			// Ignore playback rejection if the file is missing or blocked.
-		});
-	}, []);
+		playFromPool(snapSoundPoolRef, "/snap.wav", 0.1);
+	}, [playFromPool]);
 
 	const handleAscButtonWithSnap = useCallback(() => {
 		playSnap();
@@ -1113,51 +1218,14 @@ export default function CoffeeGame() {
 	}, [playSnap, handleToWhere]);
 
 	useEffect(() => {
-		if (ascStep !== "dead" || !figureRef.current) return;
+		if (ascStep !== "dead") return;
 		clearCaffeineBlocks();
-		const { w, h } = renderSizeRef.current;
-		const fig = figureRef.current;
-		const bodies = [
-			fig.head,
-			fig.torso,
-			fig.upperArmL,
-			fig.lowerArmL,
-			fig.upperArmR,
-			fig.lowerArmR,
-			fig.upperLegL,
-			fig.lowerLegL,
-			fig.upperLegR,
-			fig.lowerLegR,
-		];
-		const baseX = w * 0.52;
-		const baseY = h - 90;
-		const offsets = [
-			{ x: -48, y: -75 },
-			{ x: -12, y: -42 },
-			{ x: -60, y: -28 },
-			{ x: -78, y: -8 },
-			{ x: 22, y: -30 },
-			{ x: 56, y: -8 },
-			{ x: -8, y: 10 },
-			{ x: -26, y: 36 },
-			{ x: 24, y: 8 },
-			{ x: 46, y: 34 },
-		];
-
-		for (let i = 0; i < bodies.length; i++) {
-			const body = bodies[i]!;
-			const o = offsets[i]!;
-			Matter.Body.setPosition(body, { x: baseX + o.x, y: baseY + o.y });
-			Matter.Body.setVelocity(body, { x: 0, y: 0 });
-			Matter.Body.setAngularVelocity(body, 0);
-			Matter.Body.setAngle(body, (Math.random() - 0.5) * 1.2);
-		}
 	}, [ascStep, clearCaffeineBlocks]);
 
 	// ── Effects for chromatic aberration on ghost ─────────────────────────────
 	const isDead = ascStep === "dead";
 	const baseFx = computeEffects(caffeineLevel);
-	const endingNoEffects = phase === "black" || ascStep === "dead";
+	const endingNoEffects = ascStep === "dead";
 	const fx = endingNoEffects
 		? {
 				...baseFx,
